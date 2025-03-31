@@ -15,6 +15,7 @@ from wisdom_store.video_annotation.MagnifyingGlass import MagnifyingGlass
 from wisdom_store.src.utils.grabcut import grabcut_fun
 from wisdom_store.config import Config
 
+
 from PIL import ImageQt, Image
 import numpy as np
 
@@ -84,8 +85,10 @@ class MainGraphicsView(MyGraphicsView):
     singleAddLabelNum = pyqtSignal(str, str)
     singleSubLabelNum = pyqtSignal(str, str)
     rulerCreatingSuccess = pyqtSignal(float)
+    #A修改
+    changeIconSignal = pyqtSignal(bool)
 
-    def __init__(self, parent, config: Config, project: Project, mainWin):
+    def __init__(self, parent,config: Config, project: Project, mainWin):
         super(MainGraphicsView, self).__init__(parent=parent)
         self.project = project
         self.setDragMode(QGraphicsView.ScrollHandDrag)
@@ -123,6 +126,8 @@ class MainGraphicsView(MyGraphicsView):
         self.inferCompleted = False
         #A修改
         self.showCenters = False
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.blockAllEvents = False
 
         self.zoomMode = zoomMode.NoZoom
         self.birdViewShow = True
@@ -265,6 +270,10 @@ class MainGraphicsView(MyGraphicsView):
         self.scissors = None#是否开始启动智慧剪刀
         self.image = None#当前的图片，np格式
         self.ScissorspPointNum=4#点的初始密度
+    #A修改
+    def forceFocus(self):
+        """强制获取焦点（供主窗口调用）"""
+        self.setFocus()
 
     def initState(self):
         '''
@@ -407,6 +416,11 @@ class MainGraphicsView(MyGraphicsView):
         '''
         # super(MainGraphicsView, self).mousePressEvent(event)
         # print('view pressed')
+        #A修改
+        if self.blockAllEvents:
+            event.accept()
+            return
+
         s = event.localPos()
         g = self.mapToScene(s.x(), s.y()) / self._scale
         flag = False
@@ -420,6 +434,7 @@ class MainGraphicsView(MyGraphicsView):
             self.rightClicked = True
         else:
             self.rightClicked = False
+
 
         # 近邻标注
         if self.rightClicked == False and self.allowPolygon:
@@ -832,7 +847,8 @@ class MainGraphicsView(MyGraphicsView):
         # 近邻标注
         if type(self.selectedlabel) == PolygonCurveLabel:
             self.selectedlabel.setSelected(True)
-
+        #A修改
+        super().mousePressEvent(event)
 
     def set_waiting_win(self, status: bool, info: str = None):
         if status:
@@ -1188,10 +1204,11 @@ class MainGraphicsView(MyGraphicsView):
             self.predictor.set_input_image(self.image_RITM)
 
     def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
-        '''
-        鼠标移动事件
-        '''
-        super().mouseMoveEvent(event)
+        #A修改
+        if self.blockAllEvents:
+            event.accept()
+            return
+
         s = event.localPos()
         g = self.mapToScene(s.x(), s.y()) / self._scale
         # print('mouse move in view')
@@ -1462,6 +1479,9 @@ class MainGraphicsView(MyGraphicsView):
             self.confirmButton.move(rb + QPoint(-100, 10))
             self.cancelButton.move(rb + QPoint(-50, 10))
 
+        #A修改
+        super().mouseMoveEvent()
+
     def confirmCrop(self):
         original_image = imgPixmapToNmp(self.origImg)
         cropped_image = original_image[int(self.rectCut.rect.top()) : int(self.rectCut.rect.top() + self.rectCut.rect.height()),
@@ -1494,6 +1514,11 @@ class MainGraphicsView(MyGraphicsView):
         '''
         鼠标松开
         '''
+        #A修改
+        if self.blockAllEvents:
+            event.accept()
+            return
+
         s = event.localPos()
         if self.scrawCursor:
             if self.allowScraw:
@@ -1655,6 +1680,7 @@ class MainGraphicsView(MyGraphicsView):
     #     scraw_label.maskToPixmap(mask_image)
     #     # scraw_label.addMaskToPixmap(mask_image)
 
+
     def leaveEvent(self, event):
         # print('鼠标移出了')
         self.getPixelInformation()
@@ -1794,6 +1820,22 @@ class MainGraphicsView(MyGraphicsView):
         '''
         键盘响应事件，有一些快捷键
         '''
+        #A修改
+        if event.key() == Qt.Key_V and event.modifiers() == Qt.ShiftModifier:
+            self.blockAllEvents = True
+            if not self.showCenters:
+                self.changeIconSignal.emit(True)
+                self.setFocus()
+                self.toggleCenterPoints()
+                if self.mainWin:
+                    self.mainWin.loadRawImg()
+                event.accept()
+                return
+
+            if self.blockAllEvents:
+                event.accept()
+                return
+
         if event.key() == Qt.Key_Control:
             self.ZoomMode = True
         if (event.key() == Qt.Key_Equal) and (event.modifiers() == Qt.ControlModifier):
@@ -1816,19 +1858,6 @@ class MainGraphicsView(MyGraphicsView):
         if event.key() == Qt.Key_Shift:
             self.click_shift_mode = True
 
-        #A修改
-        if event.key() == Qt.Key_V and event.modifiers() == Qt.ShiftModifier and not self.showCenters:
-            self.showCenters = True
-            for label in self.labelList:
-                if isinstance(label, (RectLabel, PolygonCurveLabel, CircleLabel)) and not label.Die:
-                    label.showCenterPoints(True)  # 调用标注类的方法显示中心点
-                    label.setLabelVisibility(False)  # 隐藏标注框
-                    label.update()
-            self.viewport().update()  # 触发 paintEvent
-            event.accept()
-            return
-        super().keyPressEvent(event)
-
         if event.key() == Qt.Key_Delete and (event.modifiers() == Qt.NoModifier):
             for label in self.labelList:
                 if label.isSelected() == True:
@@ -1841,6 +1870,19 @@ class MainGraphicsView(MyGraphicsView):
         super(MainGraphicsView, self).keyPressEvent(event)
 
     def keyReleaseEvent(self, event: QtGui.QKeyEvent) -> None:
+        #A修改
+        if event.key() == Qt.Key_V and self.showCenters:
+            if self.showCenters:
+                self.blockAllEvents = False
+                self.changeIconSignal.emit(False)
+                self.toggleCenterPoints()
+                self.temporalLoadRawImage()
+                event.accept()
+                return
+        if self.blockAllEvents:
+            event.accept()
+            return
+
         if event.key() == Qt.Key_Control:
             self.ZoomMode = False
         if event.key() == Qt.Key_Shift:
@@ -1858,24 +1900,30 @@ class MainGraphicsView(MyGraphicsView):
                 if isinstance(label, PolygonCurveLabel):
                     label.addCtl = False
 
-        #A修改
-        if event.key() == Qt.Key_V and self.showCenters:
-            self.showCenters = False
-            for label in self.labelList:
-                if isinstance(label, (RectLabel, PolygonCurveLabel, CircleLabel)) and not label.Die:
-                    label.showCenterPoints(False)  # 调用标注类的方法隐藏中心点
-                    label.setLabelVisibility(True)  # 恢复标注框的可见性
-                    label.update()
-            self.viewport().update()
-            event.accept()
-            return
-        super().keyReleaseEvent(event)
+    def toggleCenterPoints(self):
+        self.showCenters = not self.showCenters  # 切换显示状态
+        self.updateLabels()  # 更新标注
+        if not self.showCenters:
+            self.temporalLoadRawImage()
+
+    def updateLabels(self):
+        for label in self.labelList:
+            if isinstance(label, (RectLabel, PolygonCurveLabel, CircleLabel)) and not label.Die:
+                label.setLabelVisibility(not self.showCenters)  # 隐藏或显示标注框
+                label.showCenterPoints(self.showCenters)  # 显示或隐藏中心点
+                label.update()
+        self.viewport().update()
 
 
     def wheelEvent(self, event: QtGui.QWheelEvent) -> None:
         '''
         鼠标滚轮事件
         '''
+        #A修改
+        if self.blockAllEvents:
+            event.accept()
+            return
+
         if self.allowScraw:
             if event.angleDelta().y() < 0:
                 self.changeScrawPenSize.emit(False)
