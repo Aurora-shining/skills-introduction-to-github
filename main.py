@@ -51,6 +51,10 @@ from wisdom_store.src.utils.image_process import *
 from wisdom_store.wins.main_change_type import ChangeType
 from wisdom_store.src.utils.image_resize import sliding_window_crop, resize_image
 
+#1修改 引入标注展示和形态学变换两个文件
+from wisdom_store.wins.main_labelshow import LabelShow
+from wisdom_store.wins.main_morphology import Morphology
+
 # 未使用
 class paintTool():
     Rect = 0
@@ -83,10 +87,8 @@ class MainWin(QMainWindow, WidgetWinCustom):
     signal2 = pyqtSignal()
     signalBackHome = pyqtSignal()
 
-
     def __init__(self, config: Config, auth: Auth, project: Project = None):
         super(MainWin, self).__init__()
-
         self.total = 0
         self.current_num = 0
         self.config = config    # 配置文件
@@ -199,6 +201,16 @@ class MainWin(QMainWindow, WidgetWinCustom):
         # 预分割缓存
         self.preSegCache = {}
 
+        #1修改（增加标注后处理之下的两个小窗口，标注展示和形态学变换）
+        self.ui.verticalLayout_processing.setAlignment(Qt.AlignTop)
+        self.labelShowWin = LabelShow(self)
+        self.ui.verticalLayout_processing.addWidget(self.labelShowWin)
+        self.foldingWins.append(self.labelShowWin)
+
+        self.morphologyWin = Morphology(self)
+        self.ui.verticalLayout_processing.addWidget(self.morphologyWin)
+        self.foldingWins.append(self.morphologyWin)
+
         # 弹窗
         self.importPictureAndLabelWin = ImportWindow()
         self.edgeDetectionWin = EdgeDetection()
@@ -297,7 +309,7 @@ class MainWin(QMainWindow, WidgetWinCustom):
         '''
         if name == '手势拖动':
             return self.ui.tBtnHand
-        elif name == '箭头指向':
+        elif name == '编辑标注':#A修改（修改了文字）
             return self.ui.tBtnArrow
         elif name == '放大镜':
             return self.ui.tBtnZoom
@@ -480,11 +492,14 @@ class MainWin(QMainWindow, WidgetWinCustom):
         self.ui.toolButtonRedo.setDefaultAction(self.MainGraphicsView.redoAction)
 
         self.ui.toolButtonChangeRawImg.pressed.connect(self.loadRawImg)
-        #A修改
+        #A修改（下面无空行的代码均修改过，直接复制粘贴）
+        self.ui.toolButtonChangeRawImg.pressed.connect(self.recordToolStateBeforePress)
         self.ui.toolButtonChangeRawImg.pressed.connect(lambda : self.MainGraphicsView.toggleCenterPoints())
         self.ui.toolButtonChangeRawImg.released.connect(lambda: self.MainGraphicsView.temporalLoadRawImage())
         self.ui.toolButtonChangeRawImg.released.connect(lambda: self.MainGraphicsView.toggleCenterPoints())
         self.MainGraphicsView.changeIconSignal.connect(self.changeIcon)
+        self.ui.toolButtonChangeRawImg.released.connect(lambda: self.MainGraphicsView.requestRestoreTool.emit())
+        self.MainGraphicsView.requestRestoreTool.connect(self.restoreToHandTool)
 
         self.actionImportNewData.triggered.connect(self.importNewImage)
 
@@ -543,6 +558,8 @@ class MainWin(QMainWindow, WidgetWinCustom):
         self.ui.toolButtonStatisticsToBrief.clicked.connect(lambda: self.transWidgetStatistics(True))
         self.ui.pushButtonEnhancement.clicked.connect(lambda: self.transWidgetEnhancement())
         self.ui.pushButtonSegmentation.clicked.connect(lambda: self.transWidgetSegmentation())
+        #1修改
+        self.ui.pushButtonProcessing.clicked.connect(lambda: self.transWidgetProcessing())
         self.ui.pBtnReset.clicked.connect(self.showResetWin)
 
         # 统计栏
@@ -573,6 +590,19 @@ class MainWin(QMainWindow, WidgetWinCustom):
         #   标注展示
         self.tagShowWin.AlphaChanged.connect(self.MainGraphicsView.changeAlpha)
         self.tagShowWin.AlphaSelectChanged.connect(self.MainGraphicsView.changeAlphaSelect)
+        #1修改 右侧折叠栏标注展示
+        self.labelShowWin.AlphaChanged.connect(self.MainGraphicsView.changeAlpha)
+        self.labelShowWin.AlphaSelectChanged.connect(self.MainGraphicsView.changeAlphaSelect)
+        self.labelShowWin.InstanceColorChanged.connect(self.MainGraphicsView.chengeInstanceColor) #这一部分先空着
+
+        #1修改 形态学变换
+        self.morphologyWin.TargetTypeChanged.connect(self.MainGraphicsView.changeTargetType)
+        self.morphologyWin.OperationTypeChanged.connect(self.MainGraphicsView.changeOperationType)
+        self.morphologyWin.ParameterChanged.connect(self.MainGraphicsView.changeParameter)
+        self.morphologyWin.MorphologyReset.connect(self.MainGraphicsView.resetMorphology) #应用当下的形态学变换（先空着，之后再修改）
+
+
+
         # 主视图
         self.ui.horizontalSliderThreshold.valueChanged.connect(self.setResThreshold)
         self.ui.pBtnThresholdEnsure.clicked.connect(self.thresholdEnsure)
@@ -596,12 +626,23 @@ class MainWin(QMainWindow, WidgetWinCustom):
         keyboard.on_release_key("ctrl", self.ctrl_event)
         self.signal2.connect(self.pastelabel)
 
-    #A修改
+    #A修改（增加了changeIcon、recordToolStateBeforePress、restoreToHandTool函数）
     def changeIcon(self, isShiftVPressed):
         if isShiftVPressed:
             self.ui.toolButtonChangeRawImg.setIcon(QIcon(":/resources/原图-选中.png"))
         else:
             self.ui.toolButtonChangeRawImg.setIcon(QIcon(":/resources/原图.png"))
+
+    def recordToolStateBeforePress(self):
+        if self.ui.tBtnArrow.isChecked():
+            self.MainGraphicsView.previous_tool = "edit"
+        else:
+            self.MainGraphicsView.previous_tool = None
+
+    def restoreToHandTool(self):
+        if hasattr(self.MainGraphicsView, 'previous_tool') and self.MainGraphicsView.previous_tool == "edit":
+            self.ui.tBtnHand.setChecked(True)  # 切换到手势工具
+            self.slotTBtnHand()
 
     def setProject(self, project: Project):
         self.project = project
@@ -703,6 +744,26 @@ class MainWin(QMainWindow, WidgetWinCustom):
         self.transWidgetSegmentation()
         subWin.ui.toolButtonFold.setChecked(True)
         subWin.trans()
+
+    #1修改
+    #侧边栏图像标注后处理窗口唤出
+    def showFoldingProcessingWin(self,subWin):
+        if len(self.project.classes) == 0:
+            dlg = Dialog('请先在编辑-设定目标类型中设置标签')
+            dlg.exec()
+            self.ui.tBtnArrow.click()
+            return
+        elif len(self.fileList) == 0:
+            dlg = Dialog('请先添加图片')
+            dlg.exec()
+            self.ui.tBtnArrow.click()
+            return
+        self.transWidgetManipulation(False)
+        self.transWidgetProcessing()
+        subWin.ui.toolButtonFold.setChecked(True)
+        subWin.trans()
+
+
 
     def showMainAndSetUserInfo(self):
         self.show()
@@ -1067,8 +1128,6 @@ class MainWin(QMainWindow, WidgetWinCustom):
         self.actionBrightnessContrast = self.menuImgEnhance.addAction('基本调整')
         self.actionHistogramAdjustments = self.menuImgEnhance.addAction('直方图调整')
         self.actionReversed = self.menuImgEnhance.addAction('反相')
-        #A修改
-        self.actionCheckRawImg = self.menuImgEnhance.addAction('查看原图 (Shift+V)')
         self.menuImgRotate = QMenu('图像旋转')
         self.actionAnyangle = self.menuImgRotate.addAction('任意角度')
         self.actionDNinty = self.menuImgRotate.addAction('180度')
@@ -1098,18 +1157,11 @@ class MainWin(QMainWindow, WidgetWinCustom):
         self.Hand = self.menuInteractiveLabel.addAction('手势拖动 (H/Ctrl+H)')
         self.Edit = self.menuInteractiveLabel.addAction('编辑标注 (J/Ctrl+J)')
         menuLabel.addMenu(self.menuInteractiveLabel)
-        #A修改
-        for action in self.menuInteractiveLabel.actions():
-            if action !=self.ViewAnnotationCenter:
-                action.triggered.connect(self.onMenuActionClicked)
-
 
         self.menuLabelTransfer = QMenu('标注转换')
         self.ToPolygonLabel = self.menuLabelTransfer.addAction('涂鸦转多边形 (Shift+P)')
         self.ToScrawLabel = self.menuLabelTransfer.addAction('多边形转涂鸦 (Shift+B)')
         self.ScrawFill = self.menuLabelTransfer.addAction('涂鸦孔洞填充 (Shift+F)')
-        #A修改
-        self.ViewAnnotationCenter = self.menuLabelTransfer.addAction('查看标注中心 (Shift+V)')
         menuLabel.addMenu(self.menuLabelTransfer)
         self.actionStatisticalAnalysis = menuLabel.addAction('统计分析 (Ctrl+Shift+S)')
         self.actionLabelDisplay = menuLabel.addAction('标注展示')
@@ -1125,6 +1177,12 @@ class MainWin(QMainWindow, WidgetWinCustom):
         self.actionThresholdSegmentation.triggered.connect(
             lambda: self.showFoldingSegmentationWin(self.thresholdSegmentationWin))
         # self.actionEdgeDetection.triggered.connect(lambda: self.showSubWinAndHideMain(self.edgeDetectionWin))
+        #1修改
+        self.actionLabelShow.triggered.connect(
+            lambda: self.showFoldingProcessingWin(self.lableShowWin))
+        self.actionMorphology.triggered.connect(
+            lambda: self.showFoldingProcessingWin(self.morphologyWin))
+
         self.createRectangleLabel.triggered.connect(self.ui.tBtnRectangleLabel.click)
         self.createPolygonLabel.triggered.connect(self.ui.tBtnPolygonLabel.click)
         self.createPointLabel.triggered.connect(self.ui.tBtnPointLabel.click)
@@ -1271,29 +1329,17 @@ class MainWin(QMainWindow, WidgetWinCustom):
         self.actionHelp.triggered.connect(lambda: open_url_by_browser(Config.HELP_URL))
         self.actionAbout.triggered.connect(self.showAbout)
 
-        #A修改
-        self.ViewAnnotationCenter.pressed.connect(self.onViewAnnotationCenterPressed)
-        self.ViewAnnotationCenter.released.connect(self.onViewCenterReleased)
-        self.ui.tBtnViewAnnotationCenter.setAutoRaise(False)
-
-    #A修改(增加了三个方法)
+    #A修改(增加onMenuActionClicked方法)
     def onMenuActionClicked(self):
         #菜单项点击后强制焦点回到 MainGraphicsView
         self.MainGraphicsView.forceFocus()
 
-    def onViewAnnotationCenterPressed(self):
-        self.view_center_timer = QTimer(self)
-        self.view_center_timer.setSingleShot(True)
-        self.view_center_timer.timeout.connect(self.handleLongPressViewCenter)
-        self.view_center_timer.start(500)  # 500ms长按阈值
+    def menuBar(self) -> QMenuBar:
+        bar = super().menuBar()
+        if hasattr(self, 'force_menu_visible') and self.force_menu_visible:
+            bar.setVisible(True)
+        return bar
 
-    def onViewAnnotationCenterReleased(self):
-        if hasattr(self, 'view_center_timer') and self.view_center_timer.isActive():
-            self.view_center_timer.stop()
-            # 短按不做任何事
-
-    def handleLongPressViewCenter(self):
-        self.MainGraphicsView.toggleCenterPoints()
 
     def showAbout(self):
         self.aboutWin = AboutWin()
@@ -3244,14 +3290,15 @@ class MainWin(QMainWindow, WidgetWinCustom):
         # J或ctrl+J 箭头拖动
         if a0.key() == Qt.Key_J and (a0.modifiers() == Qt.NoModifier):
             for item in self.project.toolButtons:
-                if item['name'] == '箭头指向' and item['activate']:
+                if item['name'] == '编辑标注' and item['activate']:#A修改（将箭头指向改为编辑标注）
                     self.ui.tBtnArrow.click()
                     break
         if (a0.key() == Qt.Key_J) and (a0.modifiers() == Qt.ControlModifier):
             for item in self.project.toolButtons:
-                if item['name'] == '箭头指向' and item['activate']:
+                if item['name'] == '编辑标注' and item['activate']:#A修改（此处修改同上）
                     self.ui.tBtnArrow.click()
                     break
+
         # R或ctrl+R 矩形标注
         if a0.key() == Qt.Key_R and (a0.modifiers() == Qt.NoModifier):
             for item in self.project.toolButtons:
@@ -3813,6 +3860,9 @@ class MainWin(QMainWindow, WidgetWinCustom):
         self.ui.pushButtonSegmentation.setChecked(True)
         self.ui.widgetEnhancement.setVisible(False)
         self.ui.widgetSegmentation.setVisible(True)
+        #1修改
+        self.ui.widgetProcessing.setVisible(False)
+
         if hasattr(self,'thresholdSegmentationWin') and self.thresholdSegmentationWin.ui.toolButtonFold.isChecked():
             self.thresholdSegmentationWin.show()
         # self.thresholdSegmentationWin.show()
@@ -3822,9 +3872,23 @@ class MainWin(QMainWindow, WidgetWinCustom):
         self.ui.pushButtonEnhancement.setChecked(True)
         self.ui.widgetEnhancement.setVisible(True)
         self.ui.widgetSegmentation.setVisible(False)
+        #1修改
+        self.ui.widgetProcessing.setVisible(False)
+
         if hasattr(self,'thresholdSegmentationWin') and self.thresholdSegmentationWin.ui.toolButtonFold.isChecked():
             self.thresholdSegmentationWin.hide()
         self.ui.labelMethod.setText('原图增强方法：')
+
+    #1修改
+    def transWidgetProcessing(self):
+        self.ui.pushButtonProcessing.setChecked(True)
+        self.ui.widgetProcessing.setVisible(True)
+        self.ui.widgetEnhancement.setVisible(False)
+        self.ui.widgetSegmentation.setVisible(False)
+        if hasattr(self, 'thresholdSegmentationWin') and self.thresholdSegmentationWin.ui.toolButtonFold.isChecked():
+            self.thresholdSegmentationWin.hide()
+        self.ui.labelMethod.setText('标注后处理方法：')
+
 
     def showResetWin(self):
         self.cancelWin = DeleteTypeWin()
@@ -3839,7 +3903,13 @@ class MainWin(QMainWindow, WidgetWinCustom):
             self.cancelWin.ui.labelTitle.setText("图像预分割")
             self.cancelWin.ui.pBtnOK.setText("重置")
             self.cancelWin.ui.labelSelections.setText("请问是否要重置当前图像的涂鸦/预分割标注？")
-            self.cancelWin.signalCloseDelete.connect(self.resetPreSegLabel)
+            self.cancelWin.signalCloseDelete.connect(self.resetPreSegLabel) #1修改（下一句elif）
+        elif self.ui.pushButtonProcessing.isChecked():
+            self.cancelWin.show('processing', -1, -1)
+            self.cancelWin.ui.labelTitle.setText("标注后处理")
+            self.cancelWin.ui.pBtnOK.setText("重置")
+            self.cancelWin.ui.labelSelections.setText("请问是否要重置当前图像的涂鸦标注后处理？")
+            self.cancelWin.signalCloseDelete.connect(self.resetProcessing)
 
     def resetPreSegLabel(self):
         self.thresholdSegmentationWin.reset()
@@ -4014,6 +4084,9 @@ class MainWin(QMainWindow, WidgetWinCustom):
         self.ui.widgetSensibility.setVisible(True)
         self.arrowTool()
         self.birdView.setVisible(False)
+
+
+
 
     def slotTBtnBrush(self):
         '''
@@ -4804,8 +4877,6 @@ class MainWin(QMainWindow, WidgetWinCustom):
             self.ToPolygonLabel.setEnabled(True)
             self.ToScrawLabel.setEnabled(True)
             self.ToScrawLabel.setEnabled(True)
-            #A修改
-            self.ViewAnnotationCenter.setEnabled(True)
             self.ScrawFill.setEnabled(True)
             self.actionLabelDisplay.setEnabled(True)
             self.actionStatisticalAnalysis.setEnabled(True)
@@ -4916,8 +4987,6 @@ class MainWin(QMainWindow, WidgetWinCustom):
             self.ToScrawLabel.setEnabled(False)
             self.ToScrawLabel.setEnabled(False)
             self.ScrawFill.setEnabled(False)
-            #A修改
-            self.ViewAnnotationCenter.setEnabled(False)
             self.actionLabelDisplay.setEnabled(False)
             self.actionStatisticalAnalysis.setEnabled(False)
             # 视图

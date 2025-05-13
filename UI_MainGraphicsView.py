@@ -1,9 +1,10 @@
 from http.client import INSUFFICIENT_STORAGE
 
-from PyQt5.QtWidgets import QGraphicsView, QGraphicsPixmapItem, QGraphicsScene, QUndoCommand, QUndoStack, QPushButton, QGraphicsRectItem, QGraphicsTextItem
+from PyQt5.QtWidgets import QGraphicsView, QGraphicsPixmapItem, QGraphicsScene, QUndoCommand, QUndoStack, QPushButton, \
+    QGraphicsRectItem, QGraphicsTextItem, QApplication
 from PyQt5 import QtGui, QtWidgets, QtCore
 from PyQt5.QtGui import QImage, QPixmap, QColor, QPolygonF, QCursor, QKeySequence, QIcon, QPen, QBrush, QFont, QPainter
-from PyQt5.QtCore import Qt, pyqtSignal, QMutex, QWaitCondition
+from PyQt5.QtCore import Qt, pyqtSignal, QMutex, QWaitCondition, QEvent
 from PyQt5.QtCore import QRectF, QSizeF, QPoint, QPointF, QRect, QRectF
 from wisdom_store.src.utils.image_transform import imgPixmapToNmp, nmpToImgPixmap
 
@@ -30,6 +31,7 @@ import torch
 from wisdom_store.src.utils.RITM.isegm.inference import clicker
 from wisdom_store.src.utils.RITM.isegm.inference.predictors import get_predictor
 from wisdom_store.src.utils.RITM.isegm.inference import utils
+from wisdom_store.wins import Dialog
 from wisdom_store.wins.WidgetWinCustom import CommonThread
 from wisdom_store.wins.component_waiting import WaitingWin
 
@@ -86,7 +88,8 @@ class MainGraphicsView(MyGraphicsView):
     singleSubLabelNum = pyqtSignal(str, str)
     rulerCreatingSuccess = pyqtSignal(float)
     #A修改
-    changeIconSignal = pyqtSignal(bool)
+    changeIconSignal = pyqtSignal(bool)#用于修改“切换原图”按钮的图案
+    requestRestoreTool = pyqtSignal()#当松开“shift+V”后，若处于编辑标注状态下，则转换至手势拖动状态
 
     def __init__(self, parent,config: Config, project: Project, mainWin):
         super(MainGraphicsView, self).__init__(parent=parent)
@@ -127,7 +130,9 @@ class MainGraphicsView(MyGraphicsView):
         #A修改
         self.showCenters = False
         self.setFocusPolicy(Qt.StrongFocus)
-        self.blockAllEvents = False
+        self.shift_v_locked = False
+        self.previous_tool = None#标志位，记录按住“Shift+V”之前按钮的选中状态
+        QApplication.instance().installEventFilter(self)#事件过滤器，用于处理拦截键盘操作
 
         self.zoomMode = zoomMode.NoZoom
         self.birdViewShow = True
@@ -147,6 +152,15 @@ class MainGraphicsView(MyGraphicsView):
 
         self.alpha = 127
         self.alphaSelect = 191
+        #1修改（添加形态学变换的相关变量）
+        self.current_target_type = ""
+        self.current_morph_operation = "无"
+        self.morph_iterations = 1
+        self.region_size = 100
+        self.skeleton_width = 2
+        self.original_mask = None  # 存储原始人工标注mask
+        self.processed_mask = None  # 存储处理后的mask
+        self.has_applied_morph = False  # 标记是否已应用形态学变换
 
         # 开启追踪
         self.setMouseTracking(True)
@@ -270,10 +284,43 @@ class MainGraphicsView(MyGraphicsView):
         self.scissors = None#是否开始启动智慧剪刀
         self.image = None#当前的图片，np格式
         self.ScissorspPointNum=4#点的初始密度
+
+
     #A修改
     def forceFocus(self):
         """强制获取焦点（供主窗口调用）"""
         self.setFocus()
+
+    def eventFilter(self, obj, event):
+        if self.shift_v_locked:
+            if event.type() == QEvent.KeyRelease:
+                return False
+            if event.type() in [
+                QEvent.MouseButtonPress,
+                QEvent.MouseButtonRelease,
+                QEvent.MouseMove,
+                QEvent.Wheel,
+                QEvent.KeyPress,
+            ]:
+                return True  # 阻止事件传递
+        return super().eventFilter(obj, event)
+
+    def restoreNormalState(self):
+        self.shift_v_locked = False
+        self.changeIconSignal.emit(False)
+        self.toggleCenterPoints()
+        self.temporalLoadRawImage()
+        self.setFocus()
+        self.requestRestoreTool.emit()
+        #A修改（上述代码）
+
+        self.unsetCursor()
+        self.ZoomMode = False
+        self.horiWheel = False
+        self.vertiWheel = False
+        self.click_shift_mode = False
+
+
 
     def initState(self):
         '''
@@ -416,11 +463,6 @@ class MainGraphicsView(MyGraphicsView):
         '''
         # super(MainGraphicsView, self).mousePressEvent(event)
         # print('view pressed')
-        #A修改
-        if self.blockAllEvents:
-            event.accept()
-            return
-
         s = event.localPos()
         g = self.mapToScene(s.x(), s.y()) / self._scale
         flag = False
@@ -434,7 +476,6 @@ class MainGraphicsView(MyGraphicsView):
             self.rightClicked = True
         else:
             self.rightClicked = False
-
 
         # 近邻标注
         if self.rightClicked == False and self.allowPolygon:
@@ -847,8 +888,6 @@ class MainGraphicsView(MyGraphicsView):
         # 近邻标注
         if type(self.selectedlabel) == PolygonCurveLabel:
             self.selectedlabel.setSelected(True)
-        #A修改
-        super().mousePressEvent(event)
 
     def set_waiting_win(self, status: bool, info: str = None):
         if status:
@@ -1204,11 +1243,10 @@ class MainGraphicsView(MyGraphicsView):
             self.predictor.set_input_image(self.image_RITM)
 
     def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
-        #A修改
-        if self.blockAllEvents:
-            event.accept()
-            return
-
+        '''
+        鼠标移动事件
+        '''
+        super().mouseMoveEvent(event)
         s = event.localPos()
         g = self.mapToScene(s.x(), s.y()) / self._scale
         # print('mouse move in view')
@@ -1229,26 +1267,27 @@ class MainGraphicsView(MyGraphicsView):
         else:
             self.square_pos = None
             self.viewport().update()  # Request a repaint
-        if hasattr(self, 'allowIntelligentScissors') and self.allowIntelligentScissors and self.scissors and self.creatinglabel != None:
+        if hasattr(self,
+                   'allowIntelligentScissors') and self.allowIntelligentScissors and self.scissors and self.creatinglabel != None:
             s = event.localPos()
-            g = self.mapToScene(s.x(), s.y())/self._scale
-            x=g.x()-self.g3.x()
-            y=g.y()-self.g3.y()
+            g = self.mapToScene(s.x(), s.y()) / self._scale
+            x = g.x() - self.g3.x()
+            y = g.y() - self.g3.y()
             while len(self.creatinglabel.polygon) > self.count:
                 self.creatinglabel.polygon.remove(len(self.creatinglabel.polygon) - 1)
                 self.creatinglabel.prectl.remove(len(self.creatinglabel.prectl) - 1)
                 self.creatinglabel.nexctl.remove(len(self.creatinglabel.nexctl) - 1)
-                self.creatinglabel.pointNum=self.creatinglabel.pointNum-1
-            if self.g3.x()<g.x()<self.g4.x() and self.g3.y()<g.y()< self.g4.y():
+                self.creatinglabel.pointNum = self.creatinglabel.pointNum - 1
+            if self.g3.x() < g.x() < self.g4.x() and self.g3.y() < g.y() < self.g4.y():
                 if self.hasMap and 0 <= x < self.src.shape[1] and 0 <= y < self.src.shape[0]:  # 检查鼠标是否在图像范围内
                     contour = self.tool.getContour((int(x), int(y)))  # 获取轮廓
                     self.contours = [contour]
-                x=0
+                x = 0
                 for point in self.contours:
                     for i in point:
                         for j in i:
-                            x=x+1
-                            if x%self.ScissorspPointNum==0:
+                            x = x + 1
+                            if x % self.ScissorspPointNum == 0:
                                 newPoint = self.creatinglabel.pointNormalized(
                                     QPointF(j[0] + self.g3.x(), j[1] + self.g3.y()))
                                 while len(self.creatinglabel.polygon) > self.creatinglabel.pointNum:
@@ -1265,8 +1304,8 @@ class MainGraphicsView(MyGraphicsView):
                 self.creatinglabel.nexctl.append(newPoint)
                 self.creatinglabel.pointNum = self.creatinglabel.pointNum + 1
                 self.creatinglabel.focusedPointIndex = self.creatinglabel.pointNum
-                #print(self.creatinglabel.focusedPointIndex)
-                #print(len(self.creatinglabel.polygon))
+                # print(self.creatinglabel.focusedPointIndex)
+                # print(len(self.creatinglabel.polygon))
             else:
                 newPoint = self.creatinglabel.pointNormalized(g)
                 self.creatinglabel.polygon.append(newPoint)
@@ -1275,12 +1314,12 @@ class MainGraphicsView(MyGraphicsView):
                 self.creatinglabel.pointNum = self.creatinglabel.pointNum + 1
                 self.creatinglabel.focusedPointIndex = self.creatinglabel.pointNum
                 pass
-        
+
         # 近邻标注
-        if self.quick and self.polygon_quick_clicknum==0:
+        if self.quick and self.polygon_quick_clicknum == 0:
             flag = False
-            
-            #移动点放大
+
+            # 移动点放大
             for i in range(len(self.selectedlabel.polygon)):
                 t_point = self.selectedlabel.polygon.value(i)
                 t_dist = (g.x() - t_point.x()) ** 2 + (g.y() - t_point.y()) ** 2
@@ -1289,15 +1328,15 @@ class MainGraphicsView(MyGraphicsView):
                     flag = True
                     self.selectedlabel.update()
                     self.update()
-                    #print(i)
+                    # print(i)
                     break
             if not flag:
                 self.selectedlabel.hoverPointIndex = None
                 self.selectedlabel.update()
                 self.update()
 
-        if self.quick ==True and self.point1!=None and self.polygon_quick_clicknum == 1:#并且要point1不为空才行
-            m = self.selectedlabel.h_diameter*self.selectedlabel.h_diameter#灵敏度
+        if self.quick == True and self.point1 != None and self.polygon_quick_clicknum == 1:  # 并且要point1不为空才行
+            m = self.selectedlabel.h_diameter * self.selectedlabel.h_diameter  # 灵敏度
             p = None
             g = self.mapToScene(s.x(), s.y()) / self._scale
             for PtWithFlag in self.selectedlabel.points_with_flags:
@@ -1313,24 +1352,24 @@ class MainGraphicsView(MyGraphicsView):
             else:
                 point = QPointF(p.point)
                 self.creatinglabel.quicking = True
-                pnum=self.selectedlabel.CheckPointNum(point)
-                #print(self.p1num)
-                #print(pnum)
+                pnum = self.selectedlabel.CheckPointNum(point)
+                # print(self.p1num)
+                # print(pnum)
                 while len(self.creatinglabel.polygon) > self.cre_num_bef_quick:
                     self.creatinglabel.polygon.remove(len(self.creatinglabel.polygon) - 1)
                     self.creatinglabel.prectl.remove(len(self.creatinglabel.prectl) - 1)
                     self.creatinglabel.nexctl.remove(len(self.creatinglabel.nexctl) - 1)
-                    self.creatinglabel.pointNum=self.creatinglabel.pointNum-1
+                    self.creatinglabel.pointNum = self.creatinglabel.pointNum - 1
                     self.update()
-                #self.creatinglabel.quicked_points_list_end_polygon=[]
-                #self.creatinglabel.quicked_points_list_end_prectl=[]
-                #self.creatinglabel.quicked_points_list_end_nextctl=[]
-                #下面的if为沿着++方向
-                #else为沿着--方向
-                if self.p1num==pnum:
+                # self.creatinglabel.quicked_points_list_end_polygon=[]
+                # self.creatinglabel.quicked_points_list_end_prectl=[]
+                # self.creatinglabel.quicked_points_list_end_nextctl=[]
+                # 下面的if为沿着++方向
+                # else为沿着--方向
+                if self.p1num == pnum:
                     newPoint = self.selectedlabel.polygon.value(self.p1num)
-                    #newPointprectl = self.selectedlabel.prectl.value(self.p1num)
-                    #newPointnexctl = self.selectedlabel.nexctl.value(self.p1num)
+                    # newPointprectl = self.selectedlabel.prectl.value(self.p1num)
+                    # newPointnexctl = self.selectedlabel.nexctl.value(self.p1num)
                     self.creatinglabel.polygon.append(newPoint)
                     self.creatinglabel.prectl.append(newPoint)
                     self.creatinglabel.nexctl.append(newPoint)
@@ -1342,19 +1381,19 @@ class MainGraphicsView(MyGraphicsView):
                     self.creatinglabel.nexctl.append(newPoint)
                     self.creatinglabel.pointNum = self.creatinglabel.pointNum + 1
 
-                    self.creatinglabel.focusedPointIndex=-1
+                    self.creatinglabel.focusedPointIndex = -1
                     self.update()
-                elif self.cal_pol_quick_dir(self.p1num,pnum):
+                elif self.cal_pol_quick_dir(self.p1num, pnum):
                     self.creatinglabel.prectl.remove(self.p1num_crealabel)
                     self.creatinglabel.nexctl.remove(self.p1num_crealabel)
                     newPointprectl = self.selectedlabel.prectl.value(self.p1num)
                     newPointnexctl = self.selectedlabel.nexctl.value(self.p1num)
                     self.creatinglabel.prectl.insert(self.p1num_crealabel, newPointprectl)
                     self.creatinglabel.nexctl.insert(self.p1num_crealabel, newPointnexctl)
-                    i=self.p1num+1
+                    i = self.p1num + 1
                     while 1:
-                        i=i%self.selectedlabel.pointNum
-                        if i!=pnum:
+                        i = i % self.selectedlabel.pointNum
+                        if i != pnum:
                             newPoint = self.selectedlabel.polygon.value(i)
                             newPointprectl = self.selectedlabel.prectl.value(i)
                             newPointnexctl = self.selectedlabel.nexctl.value(i)
@@ -1362,8 +1401,8 @@ class MainGraphicsView(MyGraphicsView):
                             self.creatinglabel.prectl.append(newPointprectl)
                             self.creatinglabel.nexctl.append(newPointnexctl)
                             self.creatinglabel.pointNum = self.creatinglabel.pointNum + 1
-                            i=i+1
-                            self.temp_ptnum=len(self.creatinglabel.polygon)
+                            i = i + 1
+                            self.temp_ptnum = len(self.creatinglabel.polygon)
                         else:
                             break
                     newPoint = self.selectedlabel.polygon.value(pnum)
@@ -1378,7 +1417,7 @@ class MainGraphicsView(MyGraphicsView):
                     self.creatinglabel.prectl.append(newPoint)
                     self.creatinglabel.nexctl.append(newPoint)
                     self.creatinglabel.pointNum = self.creatinglabel.pointNum + 1
-                    self.creatinglabel.focusedPointIndex=-1
+                    self.creatinglabel.focusedPointIndex = -1
                     self.update()
                 else:
                     self.creatinglabel.prectl.remove(self.p1num_crealabel)
@@ -1387,10 +1426,10 @@ class MainGraphicsView(MyGraphicsView):
                     newPointnexctl = self.selectedlabel.prectl.value(self.p1num)
                     self.creatinglabel.prectl.insert(self.p1num_crealabel, newPointprectl)
                     self.creatinglabel.nexctl.insert(self.p1num_crealabel, newPointnexctl)
-                    j=self.p1num-1
+                    j = self.p1num - 1
                     while 1:
                         j = j % self.selectedlabel.pointNum
-                        if j!=pnum:
+                        if j != pnum:
                             newPoint = self.selectedlabel.polygon.value(j)
                             newPointprectl = self.selectedlabel.nexctl.value(j)
                             newPointnexctl = self.selectedlabel.prectl.value(j)
@@ -1398,8 +1437,8 @@ class MainGraphicsView(MyGraphicsView):
                             self.creatinglabel.prectl.append(newPointprectl)
                             self.creatinglabel.nexctl.append(newPointnexctl)
                             self.creatinglabel.pointNum = self.creatinglabel.pointNum + 1
-                            j=j-1
-                            self.temp_ptnum=len(self.creatinglabel.polygon)
+                            j = j - 1
+                            self.temp_ptnum = len(self.creatinglabel.polygon)
                         else:
                             break
                     newPoint = self.selectedlabel.polygon.value(pnum)
@@ -1415,9 +1454,9 @@ class MainGraphicsView(MyGraphicsView):
                     self.creatinglabel.prectl.append(newPoint)
                     self.creatinglabel.nexctl.append(newPoint)
                     self.creatinglabel.pointNum = self.creatinglabel.pointNum + 1
-                    self.creatinglabel.focusedPointIndex=-1
+                    self.creatinglabel.focusedPointIndex = -1
                     self.update()
-        
+
         if self.magnifying == True:
             s = event.localPos()
             g = self.mapToScene(s.x(), s.y())
@@ -1432,7 +1471,6 @@ class MainGraphicsView(MyGraphicsView):
                     label.painting = False
                     label.point_list = self.erase_points
                     label.update()
-
 
         if self.allowAIMagic and self.Hovermode:
             point = self.pointNormalized(self.mapToScene(s.toPoint()) / self._scale)
@@ -1473,14 +1511,14 @@ class MainGraphicsView(MyGraphicsView):
                 self.scrawCursor.setVisible(False)
 
         if hasattr(self, "rectCutText") and self.rectCutText:
-            rb = self.mapFromScene(QPoint(self.rectCut.rect.left()+self.rectCut.rect.width(), self.rectCut.rect.top()+self.rectCut.rect.height()) * self._scale)
+            rb = self.mapFromScene(QPoint(self.rectCut.rect.left() + self.rectCut.rect.width(),
+                                          self.rectCut.rect.top() + self.rectCut.rect.height()) * self._scale)
             self.rectCutText.setPlainText(f'{int(self.rectCut.rect.width())} × {int(self.rectCut.rect.height())}')
-            self.rectCutText.setPos(QPoint(self.rectCut.left(), self.rectCut.top()) + QPoint(0, -40) * self.rectCutText.scale())
+            self.rectCutText.setPos(
+                QPoint(self.rectCut.left(), self.rectCut.top()) + QPoint(0, -40) * self.rectCutText.scale())
             self.confirmButton.move(rb + QPoint(-100, 10))
             self.cancelButton.move(rb + QPoint(-50, 10))
 
-        #A修改
-        super().mouseMoveEvent()
 
     def confirmCrop(self):
         original_image = imgPixmapToNmp(self.origImg)
@@ -1514,11 +1552,6 @@ class MainGraphicsView(MyGraphicsView):
         '''
         鼠标松开
         '''
-        #A修改
-        if self.blockAllEvents:
-            event.accept()
-            return
-
         s = event.localPos()
         if self.scrawCursor:
             if self.allowScraw:
@@ -1820,10 +1853,14 @@ class MainGraphicsView(MyGraphicsView):
         '''
         键盘响应事件，有一些快捷键
         '''
-        #A修改
+        #A修改（增加了Shift+V快捷键设置）
         if event.key() == Qt.Key_V and event.modifiers() == Qt.ShiftModifier:
-            self.blockAllEvents = True
             if not self.showCenters:
+                if self.mainWin and self.mainWin.ui.tBtnArrow.isChecked():
+                    self.previous_tool = "edit"
+                else:
+                    self.previous_tool = None
+                self.shift_v_locked = True
                 self.changeIconSignal.emit(True)
                 self.setFocus()
                 self.toggleCenterPoints()
@@ -1832,77 +1869,76 @@ class MainGraphicsView(MyGraphicsView):
                 event.accept()
                 return
 
-            if self.blockAllEvents:
-                event.accept()
-                return
+        #A修改（在所有的if条件之前又加了一个if not self.shift_v_locked:）
+        if not self.shift_v_locked:
+            if event.key() == Qt.Key_Control:
+                self.ZoomMode = True
+            if (event.key() == Qt.Key_Equal) and (event.modifiers() == Qt.ControlModifier):
+                self.zoomIn()
+            if (event.key() == Qt.Key_Minus) and (event.modifiers() == Qt.ControlModifier):
+                self.zoomOut()
+            if event.key() == Qt.Key_Shift:
+                self.horiWheel = True
+                self.click_shift_mode = True
+                for label in self.labelList:
+                    if label.isSelected() and isinstance(label, PolygonCurveLabel):
+                        label.modifing = True
+            # TODO 快捷键alt
+            if event.key() == Qt.Key_Alt:
+                print('alt1')
+                self.vertiWheel = True
+                for label in self.labelList:
+                    if label.isSelected() and isinstance(label, PolygonCurveLabel):
+                        label.addCtl = True
+            if event.key() == Qt.Key_Shift:
+                self.click_shift_mode = True
 
-        if event.key() == Qt.Key_Control:
-            self.ZoomMode = True
-        if (event.key() == Qt.Key_Equal) and (event.modifiers() == Qt.ControlModifier):
-            self.zoomIn()
-        if (event.key() == Qt.Key_Minus) and (event.modifiers() == Qt.ControlModifier):
-            self.zoomOut()
-        if event.key() == Qt.Key_Shift:
-            self.horiWheel = True
-            self.click_shift_mode = True
-            for label in self.labelList:
-                if label.isSelected() and isinstance(label, PolygonCurveLabel):
-                    label.modifing = True
-    # TODO 快捷键alt
-        if event.key() == Qt.Key_Alt:
-            print('alt1')
-            self.vertiWheel = True
-            for label in self.labelList:
-                if label.isSelected() and isinstance(label, PolygonCurveLabel):
-                    label.addCtl = True
-        if event.key() == Qt.Key_Shift:
-            self.click_shift_mode = True
+            if event.key() == Qt.Key_Delete and (event.modifiers() == Qt.NoModifier):
+                for label in self.labelList:
+                    if label.isSelected() == True:
+                        label.Die = True
+                        label.setVisible(False)
+                        self.pushDeleteStack(label)
+                        self.singleSubLabelNum.emit(label.type, label.labelClass)
+                self.needSaveItem.emit(True)
+                self.labelNumChanged.emit()
 
-        if event.key() == Qt.Key_Delete and (event.modifiers() == Qt.NoModifier):
-            for label in self.labelList:
-                if label.isSelected() == True:
-                    label.Die = True
-                    label.setVisible(False)
-                    self.pushDeleteStack(label)
-                    self.singleSubLabelNum.emit(label.type, label.labelClass)
-            self.needSaveItem.emit(True)
-            self.labelNumChanged.emit()
         super(MainGraphicsView, self).keyPressEvent(event)
 
     def keyReleaseEvent(self, event: QtGui.QKeyEvent) -> None:
-        #A修改
-        if event.key() == Qt.Key_V and self.showCenters:
-            if self.showCenters:
-                self.blockAllEvents = False
-                self.changeIconSignal.emit(False)
-                self.toggleCenterPoints()
-                self.temporalLoadRawImage()
-                event.accept()
-                return
-        if self.blockAllEvents:
+        #A修改（增加了Shift+V快捷键设置）
+        if self.shift_v_locked and (event.key() == Qt.Key_V or event.key() == Qt.Key_Shift):
+            self.restoreNormalState()
+            self.requestRestoreTool.emit()
             event.accept()
             return
 
-        if event.key() == Qt.Key_Control:
-            self.ZoomMode = False
-        if event.key() == Qt.Key_Shift:
-            self.horiWheel = False
-            self.click_shift_mode = False
-            self.updateScrawCursor()
-            # for label in self.labelList:
-            #     if label.focused == True and isinstance(label, PolygonCurveLabel):
-            #         label.modifing = False
-            #         label.clearModify()
-        if event.key() == Qt.Key_Alt:
-            print('alt2')
-            self.vertiWheel = False
-            for label in self.labelList:
-                if isinstance(label, PolygonCurveLabel):
-                    label.addCtl = False
+        #A修改（在所有的if之前加上了if not self.shift_v_locked:）
+        if not self.shift_v_locked:
+            if event.key() == Qt.Key_Control:
+                self.ZoomMode = False
+            if event.key() == Qt.Key_Shift:
+                self.horiWheel = False
+                self.click_shift_mode = False
+                self.updateScrawCursor()
+                # for label in self.labelList:
+                #     if label.focused == True and isinstance(label, PolygonCurveLabel):
+                #         label.modifing = False
+                #         label.clearModify()
+            if event.key() == Qt.Key_Alt:
+                print('alt2')
+                self.vertiWheel = False
+                for label in self.labelList:
+                    if isinstance(label, PolygonCurveLabel):
+                        label.addCtl = False
 
+        super(MainGraphicsView, self).keyReleaseEvent(event)
+
+    #A修改（增加了toggleCenterPoints， updateLabels）
     def toggleCenterPoints(self):
         self.showCenters = not self.showCenters  # 切换显示状态
         self.updateLabels()  # 更新标注
+
         if not self.showCenters:
             self.temporalLoadRawImage()
 
@@ -1911,6 +1947,9 @@ class MainGraphicsView(MyGraphicsView):
             if isinstance(label, (RectLabel, PolygonCurveLabel, CircleLabel)) and not label.Die:
                 label.setLabelVisibility(not self.showCenters)  # 隐藏或显示标注框
                 label.showCenterPoints(self.showCenters)  # 显示或隐藏中心点
+                if self.showCenters :
+                    label.drawText = False
+
                 label.update()
         self.viewport().update()
 
@@ -1919,11 +1958,6 @@ class MainGraphicsView(MyGraphicsView):
         '''
         鼠标滚轮事件
         '''
-        #A修改
-        if self.blockAllEvents:
-            event.accept()
-            return
-
         if self.allowScraw:
             if event.angleDelta().y() < 0:
                 self.changeScrawPenSize.emit(False)
@@ -2198,6 +2232,264 @@ class MainGraphicsView(MyGraphicsView):
             label.alphaSelect = alpha
             label.updateColor()
             label.update()
+
+    #1修改（添加形态学变换的相关代码）
+    def changeTargetType(self, target_type):
+        """处理目标类型变化"""
+        self.current_target_type = target_type
+        self.applyMorphology()
+
+    def changeOperationType(self, operation_type):
+        """处理操作类型变化"""
+        self.current_morph_operation = operation_type
+        self.applyMorphology()
+
+    def changeParameter(self, parameter):
+        """处理参数变化"""
+        if self.current_morph_operation in ["膨胀", "腐蚀", "开运算", "闭运算", "去枝权"]:
+            self.morph_iterations = parameter
+        elif self.current_morph_operation == "小区域删除":
+            self.region_size = parameter
+        elif self.current_morph_operation == "骨架化":
+            self.skeleton_width = parameter
+        self.applyMorphology()
+
+    def resetMorphology(self):
+        """重置形态学变换"""
+        if not self.has_applied_morph and self.original_mask is not None:
+            self.processed_mask = self.original_mask.copy()
+            self.updateMorphologyDisplay()
+            # 发送信号通知UI重置完成
+            if hasattr(self, 'MorphologyReset'):
+                self.MorphologyReset.emit()
+
+    def applyMorphology(self):
+        """应用形态学变换"""
+        # 检查是否有手工标注
+        if not self.checkManualAnnotation():
+            return
+
+        # 初始化处理后的mask
+        if self.processed_mask is None:
+            self.processed_mask = self.original_mask.copy()
+
+        # 如果没有选择操作或选择"无"，则直接返回原始mask
+        if self.current_morph_operation == "无":
+            self.processed_mask = self.original_mask.copy()
+            self.updateMorphologyDisplay()
+            return
+
+        # 根据当前目标类型从mask中提取对应部分
+        target_mask = self._extractTargetMask()
+        if target_mask is None:
+            return
+
+        try:
+            # 应用形态学操作
+            kernel = np.ones((3, 3), np.uint8)
+            processed = target_mask.copy()
+
+            if self.current_morph_operation == "膨胀":
+                processed = cv2.dilate(processed, kernel, iterations=self.morph_iterations)
+            elif self.current_morph_operation == "腐蚀":
+                processed = cv2.erode(processed, kernel, iterations=self.morph_iterations)
+            elif self.current_morph_operation == "开运算":
+                processed = cv2.morphologyEx(processed, cv2.MORPH_OPEN, kernel, iterations=self.morph_iterations)
+            elif self.current_morph_operation == "闭运算":
+                processed = cv2.morphologyEx(processed, cv2.MORPH_CLOSE, kernel, iterations=self.morph_iterations)
+            elif self.current_morph_operation == "小区域删除":
+                processed = self._removeSmallRegions(processed)
+            elif self.current_morph_operation == "骨架化":
+                processed = self._skeletonize(processed)
+            elif self.current_morph_operation == "去枝权":
+                processed = self._prune(processed)
+
+            # 将处理后的部分合并回原mask
+            self._mergeProcessedMask(processed)
+            self.updateMorphologyDisplay()
+
+        except Exception as e:
+            print(f"形态学操作出错: {e}")
+
+    def confirmMorphology(self):
+        """确认应用形态学变换"""
+        if not self.checkManualAnnotation():
+            return
+
+        if self.processed_mask is not None:
+            # 更新原始mask为处理后的mask
+            self.original_mask = self.processed_mask.copy()
+            self.has_applied_morph = True
+            # 更新显示
+            self.updateDisplayWithProcessedMask()
+            # 重置状态
+            self.resetMorphologyState()
+
+    def resetMorphologyState(self):
+        """重置形态学变换状态"""
+        self.current_morph_operation = "无"
+        self.morph_iterations = 1
+        self.region_size = 100
+        self.skeleton_width = 2
+        self.has_applied_morph = False
+        # 发送信号通知UI重置
+        if hasattr(self, 'MorphologyReset'):
+            self.MorphologyReset.emit()
+
+    def checkManualAnnotation(self):#检测手动标注mask待办
+        """检查是否有手工标注"""
+        currentFile = self.parent.getCurrentFile()
+        has_manual = currentFile.hasManualAnnotation()
+
+        if not has_manual:
+            dlg = Dialog('当前图像没有人工标注的画刷标注，请标注后再进行后处理')
+            dlg.exec()
+            return False
+
+        # 检查是否有预测标注并提示
+        has_pred = currentFile.hasPrediction()
+        if has_pred:
+            dlg = Dialog('当前图像中含有已预测标注，请点击图像上方"确认"按钮，核验后再进行后处理')
+            dlg.exec()
+
+        return True
+
+    def _extractTargetMask(self):
+        """从mask中提取当前目标类型的部分"""
+        if self.original_mask is None:
+            return None
+
+        # 创建单通道mask，当前目标类型为1，其他为0
+        target_mask = np.zeros(self.original_mask.shape[:2], dtype=np.uint8)
+
+        try:
+            # 获取当前目标类型的索引
+            target_index = self.project.classes.index(self.current_target_type)
+            # 提取对应通道
+            target_mask = (self.original_mask == target_index).astype(np.uint8) * 255
+        except ValueError:
+            pass
+
+        return target_mask
+
+    def _mergeProcessedMask(self, processed):
+        """将处理后的部分合并回原mask"""
+        if self.processed_mask is None or processed is None:
+            return
+
+        try:
+            # 获取当前目标类型的索引
+            target_index = self.project.classes.index(self.current_target_type)
+            # 将处理后的区域合并到processed_mask
+            _, binary_processed = cv2.threshold(processed, 127, 1, cv2.THRESH_BINARY)
+            self.processed_mask = np.where(binary_processed[..., None],
+                                           target_index,
+                                           self.processed_mask)
+        except ValueError:
+            pass
+
+    def _removeSmallRegions(self, mask):
+        """移除小区域"""
+        # 找到所有连通区域
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8, cv2.CV_32S)
+
+        # 创建一个新mask
+        new_mask = np.zeros_like(mask)
+
+        # 遍历所有区域，保留大于阈值的区域
+        for i in range(1, num_labels):
+            if stats[i, cv2.CC_STAT_AREA] >= self.region_size:
+                new_mask[labels == i] = 255
+        return new_mask
+
+    def _skeletonize(self, mask):
+        """骨架化"""
+        skeleton = np.zeros_like(mask)
+        element = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+
+        while True:
+            eroded = cv2.erode(mask, element)
+            temp = cv2.dilate(eroded, element)
+            temp = cv2.subtract(mask, temp)
+            skeleton = cv2.bitwise_or(skeleton, temp)
+            mask = eroded.copy()
+
+            if cv2.countNonZero(mask) == 0:
+                break
+
+        # 根据参数调整骨架宽度
+        if self.skeleton_width > 1:
+            kernel = np.ones((self.skeleton_width, self.skeleton_width), np.uint8)
+            skeleton = cv2.dilate(skeleton, kernel)
+
+        return skeleton
+
+    def _prune(self, mask):
+        """去枝权"""
+        # 这是一个简化的实现
+        skeleton = self._skeletonize(mask)
+        endpoints = self._findEndpoints(skeleton)
+
+        # 从端点开始腐蚀
+        kernel = np.ones((3, 3), np.uint8)
+        for _ in range(self.morph_iterations):
+            skeleton = cv2.erode(skeleton, kernel)
+            skeleton = cv2.bitwise_and(skeleton, mask)
+
+        return skeleton
+
+    def _findEndpoints(self, skeleton):
+        """找到骨架的端点"""
+        kernel = np.array([[1, 1, 1],
+                           [1, 10, 1],
+                           [1, 1, 1]], dtype=np.uint8)
+
+        filtered = cv2.filter2D(skeleton, cv2.CV_8U, kernel)
+        return (filtered == 11).astype(np.uint8) * 255
+
+    def updateMorphologyDisplay(self):
+        """更新形态学变换的显示"""
+        if self.processed_mask is not None:
+            # 这里实现更新显示的逻辑
+            # 例如：更新涂鸦层的mask
+            scraw_label = self.getLabel(self.current_target_type, 'Scraw')
+            if scraw_label is None:
+                scraw_label = self.addNewScrawLabel(self.current_target_type)
+            scraw_label.maskToPixmap(self.processed_mask)
+            self.viewport().update()
+
+    def updateDisplayWithProcessedMask(self):
+        """使用处理后的mask更新显示"""
+        if self.original_mask is not None:
+            # 更新所有相关涂鸦层的显示
+            for cls in self.project.classes:
+                scraw_label = self.getLabel(cls, 'Scraw')
+                if scraw_label is not None:
+                    # 提取当前类别的mask
+                    class_mask = (self.original_mask == self.project.classes.index(cls)).astype(np.uint8) * 255
+                    scraw_label.maskToPixmap(class_mask)
+            self.viewport().update()
+
+    def onImageChanged(self):
+        """当图像切换时调用"""
+        # 重置形态学变换状态
+        self.resetMorphologyState()
+        # 重新加载原始mask
+        self.loadOriginalMask()
+
+    def loadOriginalMask(self):
+        """加载原始人工标注mask"""
+        currentFile = self.parent.getCurrentFile()
+        if currentFile.hasManualAnnotation():
+            # 这里实现从文件加载mask的逻辑
+            # 假设返回的是一个多通道mask，每个像素值对应类别索引
+            self.original_mask = currentFile.loadManualAnnotationMask()
+            self.processed_mask = self.original_mask.copy()
+        else:
+            self.original_mask = None
+            self.processed_mask = None
+
+    #1修改，形态学变换代码到此处结束
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         super(MainGraphicsView, self).resizeEvent(event)
@@ -2646,7 +2938,7 @@ class MainGraphicsView(MyGraphicsView):
                 if label.creating:
                     return label
 
-    #计算多边形快速标记的方向            
+    #计算多边形快速标记的方向
     def cal_pol_quick_dir(self,pointnum1,pointnum2):
         i=pointnum1
         sum1=0
@@ -2684,7 +2976,7 @@ class MainGraphicsView(MyGraphicsView):
         else:
             #print("--")
             return False
-    
+
     # 三次贝塞尔曲线的导数
     def bezier_derivative(self,A, A1, B1, B, t):
         P_prime = (-3 * (1 - t) ** 2 * np.array(A) +
@@ -2707,7 +2999,7 @@ class MainGraphicsView(MyGraphicsView):
         #print(type(A))
         length, _ = quad(lambda t: self.bezier_derivative(A, A1, B1, B, t), 0, 1)
         return length
-                
+
     def print_square_coordinates(self):
         #计算框实时的四边位置 并修改g1 g2,在mousemove和wheelevent被调用
         if self.square_pos is not None:
