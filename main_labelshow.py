@@ -45,7 +45,6 @@ class LabelShow(FoldingBarItem):
 
     def signalConnect(self):
         self.mainWin.pBtnApplyAnnotationDislay.clicked.connect(self.confirm) #应用标注展示
-        self.mainWin.pBtnDefault.clicked.connect(self.default) #默认原始设置
         self.mainWin.sliderTransparency.valueChanged.connect(self.setAlpha)
         self.mainWin.sliderSelectedTransparency.valueChanged.connect(self.setAlphaSelect)
         self.mainWin.comboBoxInstanceColor.currentTextChanged.connect(self.setInstanceColor) #设置标签颜色
@@ -54,7 +53,6 @@ class LabelShow(FoldingBarItem):
         self.alpha = 127  # 默认透明度值
         self.alphaSelect = 191  # 默认选中透明度值
         self.instanceColor = "与类型一致"  # 默认实例颜色设置
-        self.toSave = False
 
     def show(self) -> None:
         self.project = self.parent.project
@@ -72,6 +70,7 @@ class LabelShow(FoldingBarItem):
                 self.mainWin.comboBoxInstanceColor.setCurrentIndex(index)
 
         self.toSave = False
+        self.reset()
         super().show()
 
     def hide(self) -> None:
@@ -102,7 +101,7 @@ class LabelShow(FoldingBarItem):
             self.project.instanceColor = self.mainWin.comboBoxInstanceColor.currentText()
             self.project.save()
 
-    def default(self):
+    def reset(self):
         defaultAlpha = 127
         defaultAlphaSelect = 191
         defaultInstanceColor = "与类型一致"

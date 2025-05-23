@@ -14,7 +14,7 @@ class Morphology(FoldingBarItem):
     TargetTypeChanged = pyqtSignal(str)
     OperationTypeChanged = pyqtSignal(str)
     ParameterChanged = pyqtSignal(int)
-    MorphologyReset = pyqtSignal()
+    MorphologyReset = pyqtSignal(object, object, object)
 
     def __init__(self, parent):
         super(Morphology, self).__init__()
@@ -46,7 +46,7 @@ class Morphology(FoldingBarItem):
         self.stateInit()
 
     def signalConnect(self):
-        self.mainWin.pBtnApplyMorphological.clicked.connect(self.confirm)
+        self.mainWin.pBtnApplyMorphological.clicked.connect(self.confirm) #应用形态学变换
         self.mainWin.comboBoxTargetType.currentTextChanged.connect(self.onTargetTypeChanged)
         self.mainWin.comboBoxOperationType.currentTextChanged.connect(self.onOperationTypeChanged)
         self.mainWin.sliderParameterName.valueChanged.connect(self.onParameterChanged)
@@ -59,6 +59,7 @@ class Morphology(FoldingBarItem):
         self.hasManualAnnotation = False
         self.hasPrediction = False
 
+
     def show(self) -> None:
         self.project = self.parent.project
         # 初始化目标类型下拉框
@@ -69,6 +70,7 @@ class Morphology(FoldingBarItem):
         # 检查当前图像状态
         self.checkImageStatus()
 
+        # 重置形态学变换参数
         self.reset()
         super().show()
 
@@ -77,15 +79,6 @@ class Morphology(FoldingBarItem):
             self.cancel()
         return super().hide()
 
-    def checkImageStatus(self):
-        # 检查当前图像是否有手动标注和预测结果
-        currentFile = self.parent.getCurrentFile()
-        self.hasManualAnnotation = currentFile.hasManualAnnotation() #检测是否有人工标注的mask
-        self.hasPrediction = currentFile.hasPrediction() #检测是否有预测的mask
-
-        if self.hasPrediction:
-            dlg = Dialog('当前图像中含有已预测标注，请点击图像上方"确认"按钮，核验后再进行后处理')
-            dlg.exec()
 
     def update_parameter_name(self):
         '''根据操作类型更新参数名和滑块范围'''
@@ -144,11 +137,6 @@ class Morphology(FoldingBarItem):
         self.updateParamValue()
 
     def confirm(self):
-        if not self.hasManualAnnotation:
-            dlg = Dialog('当前图像没有人工标注的画刷标注，请标注后再进行后处理 ')
-            dlg.exec()
-            return
-
         self.toSave = True
         if self.operationType == "无":
             self.MorphologyReset.emit()
@@ -162,6 +150,7 @@ class Morphology(FoldingBarItem):
         self.mainWin.comboBoxOperationType.setCurrentIndex(0)
         self.update_parameter_name()
         self.MorphologyReset.emit()
+
 
     def cancel(self):
         self.MorphologyReset.emit()

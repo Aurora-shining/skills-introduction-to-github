@@ -595,14 +595,6 @@ class MainWin(QMainWindow, WidgetWinCustom):
         self.labelShowWin.AlphaSelectChanged.connect(self.MainGraphicsView.changeAlphaSelect)
         self.labelShowWin.InstanceColorChanged.connect(self.MainGraphicsView.chengeInstanceColor) #这一部分先空着
 
-        #1修改 形态学变换
-        self.morphologyWin.TargetTypeChanged.connect(self.MainGraphicsView.changeTargetType)
-        self.morphologyWin.OperationTypeChanged.connect(self.MainGraphicsView.changeOperationType)
-        self.morphologyWin.ParameterChanged.connect(self.MainGraphicsView.changeParameter)
-        self.morphologyWin.MorphologyReset.connect(self.MainGraphicsView.resetMorphology) #应用当下的形态学变换（先空着，之后再修改）
-
-
-
         # 主视图
         self.ui.horizontalSliderThreshold.valueChanged.connect(self.setResThreshold)
         self.ui.pBtnThresholdEnsure.clicked.connect(self.thresholdEnsure)
@@ -742,6 +734,7 @@ class MainWin(QMainWindow, WidgetWinCustom):
             return
         self.transWidgetManipulation(False)
         self.transWidgetSegmentation()
+
         subWin.ui.toolButtonFold.setChecked(True)
         subWin.trans()
 
@@ -1177,12 +1170,6 @@ class MainWin(QMainWindow, WidgetWinCustom):
         self.actionThresholdSegmentation.triggered.connect(
             lambda: self.showFoldingSegmentationWin(self.thresholdSegmentationWin))
         # self.actionEdgeDetection.triggered.connect(lambda: self.showSubWinAndHideMain(self.edgeDetectionWin))
-        #1修改
-        self.actionLabelShow.triggered.connect(
-            lambda: self.showFoldingProcessingWin(self.lableShowWin))
-        self.actionMorphology.triggered.connect(
-            lambda: self.showFoldingProcessingWin(self.morphologyWin))
-
         self.createRectangleLabel.triggered.connect(self.ui.tBtnRectangleLabel.click)
         self.createPolygonLabel.triggered.connect(self.ui.tBtnPolygonLabel.click)
         self.createPointLabel.triggered.connect(self.ui.tBtnPointLabel.click)
@@ -2903,6 +2890,14 @@ class MainWin(QMainWindow, WidgetWinCustom):
         if self.histogramAdjustmentWin.ui.toolButtonFold.isChecked():
             self.histogramAdjustmentWin.ui.toolButtonFold.setChecked(False)
             self.histogramAdjustmentWin.trans()
+        #1修改，此处要添加Widget的可见性
+        if self.labelShowWin.ui.toolButtonFold.isChecked():
+            self.labelShowWin.ui.toolButtonFold.setChecked(False)
+            self.labelShowWin.trans()
+        if self.morphologyWin.ui.toolButtonFold.isChecked():
+            self.morphologyWin.ui.toolButtonFold.setChecked(False)
+            self.morphologyWin.ui.trans()
+
         # 保留上一张标注冲突(图像大小不一致或已有标注)
         if self.action_keep_label.isChecked():
             # 判断当前图是否为预分割
@@ -3885,10 +3880,14 @@ class MainWin(QMainWindow, WidgetWinCustom):
         self.ui.widgetProcessing.setVisible(True)
         self.ui.widgetEnhancement.setVisible(False)
         self.ui.widgetSegmentation.setVisible(False)
-        if hasattr(self, 'thresholdSegmentationWin') and self.thresholdSegmentationWin.ui.toolButtonFold.isChecked():
-            self.thresholdSegmentationWin.hide()
-        self.ui.labelMethod.setText('标注后处理方法：')
 
+        # 确保子窗口展开状态同步
+        if self.labelShowWin.ui.toolButtonFold.isChecked():
+            self.labelShowWin.show()
+        if self.morphologyWin.ui.toolButtonFold.isChecked():
+            self.morphologyWin.show()
+
+        self.ui.labelMethod.setText('标注后处理方法：')
 
     def showResetWin(self):
         self.cancelWin = DeleteTypeWin()
@@ -3910,6 +3909,14 @@ class MainWin(QMainWindow, WidgetWinCustom):
             self.cancelWin.ui.pBtnOK.setText("重置")
             self.cancelWin.ui.labelSelections.setText("请问是否要重置当前图像的涂鸦标注后处理？")
             self.cancelWin.signalCloseDelete.connect(self.resetProcessing)
+
+    #1修改，重置标注后处理（之后再写完整）
+    def resetProcessing(self):#1修改
+        # 重置标注展示
+        self.labelShowWin.default()
+        # 重置形态学变换
+        self.morphologyWin.resetParameters()
+        self.MainGraphicsView.resetMorphology()
 
     def resetPreSegLabel(self):
         self.thresholdSegmentationWin.reset()
@@ -4116,6 +4123,61 @@ class MainWin(QMainWindow, WidgetWinCustom):
         self.scrawLabel()
         self.birdView.setVisible(False)
         # self.loadPreSegCache(-1)
+
+    #1修改，定义函数只对人工标注的mask做形态学变换
+    def check_manual_mask(self):
+        has_manual_mask = False
+        has_predicted_mask = False
+
+        for label in self.MainGraphicsView.getLabelList():
+            if type(label) == ScrawLabel and not label.Die:
+                if label.confidence == 1:
+                    has_manual_mask = True
+                else:
+                    has_predicted_mask = True
+
+        if has_manual_mask:
+            # 存在人工标注，连接信号并允许后续操作
+            self._connect_morphology_signals()
+            self.morphologyWin.show()
+        elif has_predicted_mask:
+            # 存在预测标注，断开信号连接并提示用户
+            self._disconnect_morphology_signals()
+            alertWarning(
+                self,
+                "警告",
+                "当前图像中含有已预测标注，请点击图像上方确认按钮，核验后再进行后处理",
+            "确认"
+            )
+        else:
+            # 没有任何标注，断开信号连接并提示用户
+            self._disconnect_morphology_signals()
+            alertWarning(
+                self,
+                "警告",
+                "当前图像没有人工标注的画刷标注，请标注后再进行后处理。",
+                "确认"
+            )
+
+    def _connect_morphology_signals(self):
+        """连接形态学操作信号"""
+        self.morphologyWin.TargetTypeChanged.connect(self.MainGraphicsView.changeTargetType)
+        self.morphologyWin.OperationTypeChanged.connect(self.MainGraphicsView.changeOperationType)
+        self.morphologyWin.ParameterChanged.connect(self.MainGraphicsView.changeParameter)
+        self.morphologyWin.MorphologyReset.connect(self.MainGraphicsView.resetMorphology)
+
+    def _disconnect_morphology_signals(self):
+        """断开形态学操作信号"""
+        try:
+            self.morphologyWin.TargetTypeChanged.disconnect(self.MainGraphicsView.changeTargetType)
+            self.morphologyWin.OperationTypeChanged.disconnect(self.MainGraphicsView.changeOperationType)
+            self.morphologyWin.ParameterChanged.disconnect(self.MainGraphicsView.changeParameter)
+            self.morphologyWin.MorphologyReset.disconnect(self.MainGraphicsView.resetMorphology)
+        except TypeError:
+            # 处理信号未连接的情况
+            pass
+
+
 
     def slotTBtnZoom(self):
         '''

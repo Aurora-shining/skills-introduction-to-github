@@ -46,6 +46,11 @@ import onnxruntime
 import time
 # 计算时间
 from PyQt5.QtCore import QTimer
+#1修改，引入形态学变换需要的相关包
+from skimage.morphology import skeletonize, remove_small_objects
+from skimage.measure import label, regionprops
+
+
 
 
 class paintTool():
@@ -153,6 +158,7 @@ class MainGraphicsView(MyGraphicsView):
         self.alpha = 127
         self.alphaSelect = 191
         #1修改（添加形态学变换的相关变量）
+        # 初始化形态学变换相关变量
         self.current_target_type = ""
         self.current_morph_operation = "无"
         self.morph_iterations = 1
@@ -2234,6 +2240,39 @@ class MainGraphicsView(MyGraphicsView):
             label.update()
 
     #1修改（添加形态学变换的相关代码）
+    def scrawLabelToMask(self, scraw_label):
+        """将ScrawLabel转换为numpy mask"""
+        if not isinstance(scraw_label, ScrawLabel):
+            return None
+
+        # 获取QPixmap并转换为numpy数组
+        img = scraw_label.pixmap.toImage()
+        width, height = img.width(), img.height()
+        ptr = img.bits()
+        ptr.setsize(img.byteCount())
+        arr = np.array(ptr).reshape(height, width, 4)  # RGBA
+
+        # 转换为单通道mask
+        mask = np.zeros((height, width), dtype=np.uint8)
+        mask[(arr[..., 0] > 0) | (arr[..., 1] > 0) | (arr[..., 2] > 0)] = 255
+        return mask
+
+    def maskToScrawLabel(self, mask, scraw_label):
+        """将numpy mask更新回ScrawLabel"""
+        if not isinstance(scraw_label, ScrawLabel):
+            return
+
+        # 将单通道mask转换为RGBA QImage
+        height, width = mask.shape
+        rgba = np.zeros((height, width, 4), dtype=np.uint8)
+        rgba[..., :3] = np.dstack([mask] * 3)
+        rgba[..., 3] = 255  # Alpha通道
+
+        # 转换为QPixmap
+        img = QImage(rgba.data, width, height, QImage.Format_RGBA8888)
+        pixmap = QPixmap.fromImage(img)
+        scraw_label.maskToPixmap(pixmap)
+
     def changeTargetType(self, target_type):
         """处理目标类型变化"""
         self.current_target_type = target_type
@@ -2265,9 +2304,21 @@ class MainGraphicsView(MyGraphicsView):
 
     def applyMorphology(self):
         """应用形态学变换"""
-        # 检查是否有手工标注
-        if not self.checkManualAnnotation():
+        # 获取当前目标类型的ScrawLabel
+        scraw_label = self.getLabel(self.current_target_type, 'Scraw')
+        if scraw_label is None:
+            print("未找到目标类型的ScrawLabel")
             return
+
+        # 将ScrawLabel转换为mask
+        self.original_mask = self.scrawLabelToMask(scraw_label)
+        if self.original_mask is None:
+            print("ScrawLabel转换为mask失败")
+            return
+
+        # 如果没有选择目标类型，使用第一个类型
+        if not self.current_target_type and self.project.classes:
+            self.current_target_type = self.project.classes[0]
 
         # 初始化处理后的mask
         if self.processed_mask is None:
@@ -2282,6 +2333,7 @@ class MainGraphicsView(MyGraphicsView):
         # 根据当前目标类型从mask中提取对应部分
         target_mask = self._extractTargetMask()
         if target_mask is None:
+            print("提取目标mask失败")
             return
 
         try:
@@ -2303,19 +2355,27 @@ class MainGraphicsView(MyGraphicsView):
                 processed = self._skeletonize(processed)
             elif self.current_morph_operation == "去枝权":
                 processed = self._prune(processed)
+            else:
+                print(f"未知的形态学操作: {self.current_morph_operation}")
+                return
 
             # 将处理后的部分合并回原mask
             self._mergeProcessedMask(processed)
+
+            # 将处理后的mask更新回ScrawLabel
+            self.maskToScrawLabel(self.processed_mask, scraw_label)
+            scraw_label.update()
+
+            # 更新显示
             self.updateMorphologyDisplay()
 
         except Exception as e:
             print(f"形态学操作出错: {e}")
+            import traceback
+            traceback.print_exc()
 
     def confirmMorphology(self):
         """确认应用形态学变换"""
-        if not self.checkManualAnnotation():
-            return
-
         if self.processed_mask is not None:
             # 更新原始mask为处理后的mask
             self.original_mask = self.processed_mask.copy()
@@ -2332,27 +2392,15 @@ class MainGraphicsView(MyGraphicsView):
         self.region_size = 100
         self.skeleton_width = 2
         self.has_applied_morph = False
-        # 发送信号通知UI重置
+
+        # 重置时恢复原始mask显示
+        if self.original_mask is not None:
+            scraw_label = self.getLabel(self.current_target_type, 'Scraw')
+            if scraw_label:
+                self.maskToScrawLabel(self.original_mask, scraw_label)
+
         if hasattr(self, 'MorphologyReset'):
             self.MorphologyReset.emit()
-
-    def checkManualAnnotation(self):#检测手动标注mask待办
-        """检查是否有手工标注"""
-        currentFile = self.parent.getCurrentFile()
-        has_manual = currentFile.hasManualAnnotation()
-
-        if not has_manual:
-            dlg = Dialog('当前图像没有人工标注的画刷标注，请标注后再进行后处理')
-            dlg.exec()
-            return False
-
-        # 检查是否有预测标注并提示
-        has_pred = currentFile.hasPrediction()
-        if has_pred:
-            dlg = Dialog('当前图像中含有已预测标注，请点击图像上方"确认"按钮，核验后再进行后处理')
-            dlg.exec()
-
-        return True
 
     def _extractTargetMask(self):
         """从mask中提取当前目标类型的部分"""
@@ -2474,8 +2522,8 @@ class MainGraphicsView(MyGraphicsView):
         """当图像切换时调用"""
         # 重置形态学变换状态
         self.resetMorphologyState()
-        # 重新加载原始mask
-        self.loadOriginalMask()
+        self.original_mask = None
+        self.processed_mask = None
 
     def loadOriginalMask(self):
         """加载原始人工标注mask"""
