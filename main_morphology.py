@@ -14,7 +14,8 @@ class Morphology(FoldingBarItem):
     TargetTypeChanged = pyqtSignal(str)
     OperationTypeChanged = pyqtSignal(str)
     ParameterChanged = pyqtSignal(int)
-    MorphologyReset = pyqtSignal(object, object, object)
+    MorphologyReset = pyqtSignal()
+    MorphologyConfirm = pyqtSignal(bool)
 
     def __init__(self, parent):
         super(Morphology, self).__init__()
@@ -35,7 +36,7 @@ class Morphology(FoldingBarItem):
 
         # 初始化操作类型下拉框
         self.mainWin.comboBoxOperationType.clear()
-        operations = ["无", "膨胀", "腐蚀", "开运算", "闭运算", "小区域删除", "骨架化", "去枝权"]
+        operations = ["无", "膨胀", "腐蚀", "开运算", "闭运算", "小区域删除", "骨架化", "去枝杈"]
         for op in operations:
             self.mainWin.comboBoxOperationType.addItem(op)
 
@@ -49,6 +50,7 @@ class Morphology(FoldingBarItem):
         self.mainWin.pBtnApplyMorphological.clicked.connect(self.confirm) #应用形态学变换
         self.mainWin.comboBoxTargetType.currentTextChanged.connect(self.onTargetTypeChanged)
         self.mainWin.comboBoxOperationType.currentTextChanged.connect(self.onOperationTypeChanged)
+        self.mainWin.comboBoxTargetType.currentTextChanged.connect(self.parent.check_morphology_conditions_and_show)
         self.mainWin.sliderParameterName.valueChanged.connect(self.onParameterChanged)
 
     def stateInit(self):
@@ -56,71 +58,72 @@ class Morphology(FoldingBarItem):
         self.operationType = "无"
         self.parameterValue = 1
         self.toSave = False
-        self.hasManualAnnotation = False
-        self.hasPrediction = False
-
 
     def show(self) -> None:
         self.project = self.parent.project
-        # 初始化目标类型下拉框
-        self.mainWin.comboBoxTargetType.clear()
-        for cls in self.project.classes:
-            self.mainWin.comboBoxTargetType.addItem(cls)
+        self._refresh_target_types()
 
-        # 检查当前图像状态
-        self.checkImageStatus()
+        # 先禁用所有操作控件
+        self._disable_controls()
 
-        # 重置形态学变换参数
-        self.reset()
+        # 如果有目标类型可选，则启用基本控件
+        if self.mainWin.comboBoxTargetType.count() > 0:
+            if not self.targetType:  # self.targetType 是在 stateInit 中初始化为 ""
+                self.mainWin.comboBoxTargetType.setCurrentIndex(0)
+                self.onTargetTypeChanged(self.mainWin.comboBoxTargetType.currentText())
         super().show()
+        self.parent.check_morphology_conditions_and_show()
 
     def hide(self) -> None:
         if not self.toSave:
             self.cancel()
         return super().hide()
 
+    def _disable_controls(self):
+        """禁用形态学操作相关控件"""
+        self.win.setEnabled(False)
+        self.mainWin.comboBoxOperationType.setEnabled(False)
+        self.mainWin.sliderParameterName.setEnabled(False)
+        self.mainWin.pBtnApplyMorphological.setEnabled(False)
+
+    def _refresh_target_types(self):
+        """刷新目标类型下拉框内容"""
+        self.mainWin.comboBoxTargetType.clear()
+        if self.project and hasattr(self.project, 'classes'):
+            for cls_data in self.project.classes:
+                self.mainWin.comboBoxTargetType.addItem(cls_data['type'])
+
+        #根据下拉框是否为空，自动启用/禁用控件
+        if self.mainWin.comboBoxTargetType.count() == 0:
+            self._disable_controls()
 
     def update_parameter_name(self):
-        '''根据操作类型更新参数名和滑块范围'''
         current_operation = self.mainWin.comboBoxOperationType.currentText()
+        base_text = "参数名："
+        min_val, max_val = 1, 10
 
-        if current_operation == "膨胀" or current_operation == "腐蚀" or \
-                current_operation == "开运算" or current_operation == "闭运算" \
-                or current_operation == "去枝权":
-            self.mainWin.labelParameterName.setText("迭代次数：")
-            self.mainWin.sliderParameterName.setMinimum(1)
-            self.mainWin.sliderParameterName.setMaximum(10)
-            self.mainWin.sliderParameterName.setValue(1)
-            self.mainWin.labelParameterNameMin.setText("1")
-            self.mainWin.labelParameterNameMax.setText("10")
+        if current_operation in ["膨胀", "腐蚀", "开运算", "闭运算", "去枝杈"]:
+            base_text = "迭代次数："
+            min_val, max_val = 1, 10
         elif current_operation == "小区域删除":
-            self.mainWin.labelParameterName.setText("区域大小：")
-            self.mainWin.sliderParameterName.setMinimum(1)
-            self.mainWin.sliderParameterName.setMaximum(1000)
-            self.mainWin.sliderParameterName.setValue(1)
-            self.mainWin.labelParameterNameMin.setText("1")
-            self.mainWin.labelParameterNameMax.setText("1000")
+            base_text = "区域大小："
+            min_val, max_val = 1, 1000
         elif current_operation == "骨架化":
-            self.mainWin.labelParameterName.setText("骨架宽度：")
-            self.mainWin.sliderParameterName.setMinimum(1)
-            self.mainWin.sliderParameterName.setMaximum(10)
-            self.mainWin.sliderParameterName.setValue(1)
-            self.mainWin.labelParameterNameMin.setText("1")
-            self.mainWin.labelParameterNameMax.setText("10")
-        else:  # "无"操作
-            self.mainWin.labelParameterName.setText("参数名：")
-            self.mainWin.sliderParameterName.setMinimum(1)
-            self.mainWin.sliderParameterName.setMaximum(10)
-            self.mainWin.sliderParameterName.setValue(1)
-            self.mainWin.labelParameterNameMin.setText("1")
-            self.mainWin.labelParameterNameMax.setText("10")
+            base_text = "骨架宽度："
+            min_val, max_val = 1, 10
 
-        # 更新当前参数值显示
+        self.mainWin.sliderParameterName.setMinimum(min_val)
+        self.mainWin.sliderParameterName.setMaximum(max_val)
+
+        self.mainWin.labelParameterName.setText(f"{base_text}")
+        self.mainWin.labelParameterNameMin.setText(str(min_val))
+        self.mainWin.labelParameterNameMax.setText(str(max_val))
         self.updateParamValue()
+
 
     def updateParamValue(self):
         self.parameterValue = self.mainWin.sliderParameterName.value()
-        self.mainWin.labelParameterName.setText(f"参数值: {self.parameterValue}")
+        self.mainWin.sliderParameterName.setValue(self.parameterValue)
         self.ParameterChanged.emit(self.parameterValue)
 
     def onTargetTypeChanged(self, targetType):
@@ -129,8 +132,10 @@ class Morphology(FoldingBarItem):
 
     def onOperationTypeChanged(self, operationType):
         self.operationType = operationType
-        self.update_parameter_name()
+        self.update_parameter_name()  # 这个会设置滑块的值和范围
         self.OperationTypeChanged.emit(operationType)
+        self.ParameterChanged.emit(self.mainWin.sliderParameterName.value()) # 确保参数也更新
+        self.parent.check_morphology_conditions_and_show()
 
     def onParameterChanged(self, value):
         self.parameterValue = value
@@ -140,20 +145,29 @@ class Morphology(FoldingBarItem):
         self.toSave = True
         if self.operationType == "无":
             self.MorphologyReset.emit()
+            self.MorphologyConfirm.emit(False)  # 发送重置信号
         else:
-            pass
+            # 发送确认应用信号
+            self.MorphologyConfirm.emit(True)
 
-        self.reset()
         self.hide()
+        self.reset()
 
     def reset(self):
-        self.mainWin.comboBoxOperationType.setCurrentIndex(0)
-        self.update_parameter_name()
+        if self.mainWin.comboBoxTargetType.count() > 0:
+            pass
+        self.mainWin.comboBoxOperationType.setCurrentIndex(0)  # "无"
+        self.onOperationTypeChanged("无")
         self.MorphologyReset.emit()
+        self.toSave = False
 
 
     def cancel(self):
         self.MorphologyReset.emit()
+        self.reset()
+        self.toSave = False
+
+    def resetParameters(self):
         self.reset()
 
     def trans(self):
@@ -175,6 +189,7 @@ class Morphology(FoldingBarItem):
             if self.win:
                 self.ui.scrollArea.setWidget(self.win)
                 self.show()
+                self.parent.check_morphology_conditions_and_show()
         else:
             self.cancel()
             self.ui.widgetMain.setVisible(False)

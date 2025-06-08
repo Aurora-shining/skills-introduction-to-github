@@ -81,13 +81,13 @@ class LabelShow(FoldingBarItem):
     def transparency(self, alpha):
         return int((255 - alpha) / 255 * 100)
 
-    def alpha(self, trans):
+    def _trans_to_alpha(self, trans):
         return int((100 - trans) / 100 * 255)
 
     def confirm(self):
         self.toSave = True
-        alpha = self.alpha(self.mainWin.sliderTransparency.value())
-        alphaSelect = self.alpha(self.mainWin.sliderSelectedTransparency.value())
+        alpha = self._trans_to_alpha(self.mainWin.sliderTransparency.value())
+        alphaSelect = self._trans_to_alpha(self.mainWin.sliderSelectedTransparency.value())
 
         if alpha > alphaSelect:
             dlg = Dialog('选中透明度始终不高于普通透明度')
@@ -124,12 +124,13 @@ class LabelShow(FoldingBarItem):
         self.mainWin.comboBoxInstanceColor.setCurrentText(self.project.instanceColor)
 
     def setAlpha(self):
-        alpha = self.alpha(self.mainWin.sliderTransparency.value())
+        alpha = self._trans_to_alpha(self.mainWin.sliderTransparency.value())
         self.AlphaChanged.emit(alpha)
         self.mainWin.labelTransparencyTip.setText(f"透明度: {self.mainWin.sliderTransparency.value()}%")
 
     def setAlphaSelect(self):
-        alphaSelect = self.alpha(self.mainWin.sliderSelectedTransparency.value())
+        alphaSelect = self._trans_to_alpha(
+            self.mainWin.sliderSelectedTransparency.value())
         self.AlphaSelectChanged.emit(alphaSelect)
         self.mainWin.labelSelectedTransparencyTip.setText(
             f"选中透明度: {self.mainWin.sliderSelectedTransparency.value()}%")
