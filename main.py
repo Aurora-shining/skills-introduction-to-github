@@ -4152,10 +4152,11 @@ class MainWin(QMainWindow, WidgetWinCustom):
     def check_morphology_conditions_and_show(self):
         if not hasattr(self, 'morphologyWin') or self.lastFileIndex == -1:
             if hasattr(self, 'morphologyWin'):
-                self.morphologyWin.win.setEnabled(False)
-                self.morphologyWin.mainWin.comboBoxOperationType.setEnabled(False)
-                self.morphologyWin.mainWin.sliderParameterName.setEnabled(False)
-                self.morphologyWin.mainWin.pBtnApplyMorphological.setEnabled(False)
+                pass
+                # self.morphologyWin.win.setEnabled(False)
+                # self.morphologyWin.mainWin.comboBoxOperationType.setEnabled(False)
+                # self.morphologyWin.mainWin.sliderParameterName.setEnabled(False)
+                # self.morphologyWin.mainWin.pBtnApplyMorphological.setEnabled(False)
             return
 
         current_target_type = self.morphologyWin.mainWin.comboBoxTargetType.currentText()
@@ -4177,10 +4178,10 @@ class MainWin(QMainWindow, WidgetWinCustom):
 
         enable_morphology = active_manual_scraw_for_target
 
-        self.morphologyWin.win.setEnabled(enable_morphology)
-        self.morphologyWin.mainWin.comboBoxOperationType.setEnabled(enable_morphology)
-        self.morphologyWin.mainWin.sliderParameterName.setEnabled(enable_morphology)
-        self.morphologyWin.mainWin.pBtnApplyMorphological.setEnabled(enable_morphology)
+        # self.morphologyWin.win.setEnabled(enable_morphology)
+        # self.morphologyWin.mainWin.comboBoxOperationType.setEnabled(enable_morphology)
+        # self.morphologyWin.mainWin.sliderParameterName.setEnabled(enable_morphology)
+        # self.morphologyWin.mainWin.pBtnApplyMorphological.setEnabled(enable_morphology)
 
         if not enable_morphology:
             self.MainGraphicsView.resetMorphologyPreview()  # 如果不满足条件，重置预览
